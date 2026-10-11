@@ -301,7 +301,7 @@ def drawing_size(item: Species) -> tuple[int, int]:
     dx = max(coords[:, 0]) - min(coords[:, 0])
     dy = max(coords[:, 1]) - min(coords[:, 1])
     # 标签需要额外空间；画布按实际结构跨度设置，减少大片空白。
-    return max(300, min(1800, int(dx * 40 + 160))), max(280, min(1200, int(dy * 40 + 120)))
+    return max(300, min(1800, int(dx * 30 + 120))), max(240, min(1200, int(dy * 30 + 100)))
 
 
 def molecule_drawing(item: Species, width: int, height: int, svg: bool):
@@ -313,8 +313,9 @@ def molecule_drawing(item: Species, width: int, height: int, svg: bool):
     opts.padding = 0.08
     opts.bondLineWidth = 2.2
     opts.multipleBondOffset = 0.075  # 多重键平行线间距为默认值的一半。
-    opts.fixedBondLength = 65
-    opts.maxFontSize = 30
+    opts.fixedBondLength = 45
+    opts.maxFontSize = 26
+    opts.fixedFontSize = 24  # 缩短键线时保持标签可读，避免字体一起缩小。
     # 半展开表示：保留真实键线，将隐式氢写为 CH3/CH2/CH/NH/NH2 等基团。
     # 不向分子添加氢原子，也不改变键、手性、形式电荷或同位素。
     # 特殊碳原子由 RDKit 原生标签显示，以保留其同位素/电荷/自由基。
