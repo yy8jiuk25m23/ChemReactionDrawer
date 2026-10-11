@@ -14,6 +14,7 @@ from xml.sax.saxutils import escape
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from rdkit import Chem
+from rdkit.Geometry import Point2D
 from rdkit.Chem import rdDepictor, rdMolDescriptors
 from rdkit.Chem.Draw import rdMolDraw2D
 from rdkit.Chem import rdChemReactions
@@ -204,9 +205,54 @@ def font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def prepare_drawing_mol(item: Species) -> Chem.Mol:
-    """以刚性旋转将主要分子轴横向放置；不镜像、不改变化学结构。"""
-    mol = Chem.Mol(item.mol)
+def straight_fragment_coords(mol: Chem.Mol) -> bool:
+    """树状、无指定立体构型的组分：主链共线，直属支链垂直展开。"""
+    if mol.GetRingInfo().NumRings():
+        return False
+    if any(a.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED for a in mol.GetAtoms()):
+        return False
+    if any(b.GetStereo() != Chem.BondStereo.STEREONONE for b in mol.GetBonds()):
+        return False
+    from collections import deque
+    def farthest(start):
+        queue = deque([start])
+        previous = {start: None}
+        distance = {start: 0}
+        while queue:
+            node = queue.popleft()
+            for neighbor in mol.GetAtomWithIdx(node).GetNeighbors():
+                idx = neighbor.GetIdx()
+                if idx not in previous:
+                    previous[idx] = node
+                    distance[idx] = distance[node] + 1
+                    queue.append(idx)
+        def endpoint_rank(idx):
+            atom = mol.GetAtomWithIdx(idx)
+            terminal_multiple = atom.GetDegree() == 1 and atom.GetBonds()[0].GetBondTypeAsDouble() > 1
+            return distance[idx], not terminal_multiple, -idx
+        end = max(distance, key=endpoint_rank)
+        return end, previous
+    start, _ = farthest(0)
+    end, previous = farthest(start)
+    path = [end]
+    while previous[path[-1]] is not None:
+        path.append(previous[path[-1]])
+    if path[0] > path[-1]:
+        path.reverse()
+    coords = {idx: Point2D(i * 2.0, 0.0) for i, idx in enumerate(path)}
+    trunk = set(path)
+    for idx in path:
+        branches = sorted(n.GetIdx() for n in mol.GetAtomWithIdx(idx).GetNeighbors() if n.GetIdx() not in trunk)
+        if len(branches) > 2:
+            return False  # 高配位物种保留 RDKit 的常规几何表达。
+        for j, branch in enumerate(branches):
+            coords[branch] = Point2D(coords[idx].x, 2.0 if j == 0 else -2.0)
+    rdDepictor.Compute2DCoords(mol, canonOrient=False, coordMap=coords)
+    return True
+
+
+def orient_fragment_horizontal(mol: Chem.Mol):
+    """复杂环系/立体结构只刚性旋转，不强制拉直，不镜像。"""
     rdDepictor.Compute2DCoords(mol, useRingTemplates=True)
     conf = mol.GetConformer()
     positions = [conf.GetAtomPosition(i) for i in range(mol.GetNumAtoms())]
@@ -220,6 +266,32 @@ def prepare_drawing_mol(item: Species) -> Chem.Mol:
     for i, p in enumerate(positions):
         x, y = p.x - cx, p.y - cy
         conf.SetAtomPosition(i, (x * cos_a + y * sin_a, -x * sin_a + y * cos_a, 0))
+
+
+def prepare_drawing_mol(item: Species) -> Chem.Mol:
+    """直线主链 + 正交支链；多组分物种（含反离子）在同一基线上排布。"""
+    mol = Chem.Mol(item.mol)
+    mappings = []
+    fragments = Chem.GetMolFrags(mol, asMols=True, fragsMolAtomMapping=mappings)
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    conf.Set3D(False)
+    offset = 0.0
+    order = sorted(range(len(fragments)), key=lambda i: (-fragments[i].GetNumAtoms(), i))
+    for i in order:
+        fragment = fragments[i]
+        straight = straight_fragment_coords(fragment)
+        if not straight:
+            orient_fragment_horizontal(fragment)
+        positions = fragment.GetConformer().GetPositions()
+        low = min(positions[:, 0])
+        high = max(positions[:, 0])
+        center_y = 0 if straight else (min(positions[:, 1]) + max(positions[:, 1])) / 2
+        for local, original in enumerate(mappings[i]):
+            x, y, z = positions[local]
+            conf.SetAtomPosition(original, (x - low + offset, y - center_y, 0))
+        offset += high - low + 3.0
+    mol.RemoveAllConformers()
+    mol.AddConformer(conf)
     return mol
 
 
@@ -240,7 +312,7 @@ def molecule_drawing(item: Species, width: int, height: int, svg: bool):
     opts.clearBackground = True
     opts.padding = 0.08
     opts.bondLineWidth = 2.2
-    opts.fixedBondLength = 55
+    opts.fixedBondLength = 65
     opts.maxFontSize = 30
     # 半展开表示：保留真实键线，将隐式氢写为 CH3/CH2/CH/NH/NH2 等基团。
     # 不向分子添加氢原子，也不改变键、手性、形式电荷或同位素。
@@ -369,7 +441,7 @@ def launch_gui():
     for label, value in [('自动识别', 'auto'), ('单个分子', 'molecule'), ('反应式', 'reaction')]:
         ttk.Radiobutton(mode_frame, text=label, variable=mode, value=value).pack(side='left', padx=6)
     ttk.Label(frame, text='单个分子名称 / SMILES:结构 / 化学方程式 / Reaction SMILES').pack(anchor='w')
-    ttk.Label(frame, text='半展开结构式：CH₃、CH₂、NH、NH₂ 等基团；横向紧凑布局，保留电荷及手性').pack(anchor='w')
+    ttk.Label(frame, text='直线半展开：主链水平，支链上下展开，反离子靠右；环系/立体结构保留必要几何').pack(anchor='w')
     entry = ttk.Entry(frame, font=('Microsoft YaHei', 12))
     entry.pack(fill='x', pady=6)
     entry.insert(0, 'CH3COOH + C2H5OH -> CH3COOC2H5 + H2O')

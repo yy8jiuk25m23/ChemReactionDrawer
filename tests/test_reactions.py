@@ -157,3 +157,37 @@ def test_horizontal_orientation_preserves_stereo():
     assert Chem.MolToSmiles(drawn) == before
     assert [cip for i, cip in Chem.FindMolChiralCenters(drawn)] == ['S']
     assert item.mol.GetNumConformers() == 0
+
+
+def test_straight_hydrazide_backbone_branches_and_counterion():
+    from chem_drawer import Species, parse_mol, prepare_drawing_mol
+    from rdkit import Chem
+    item = Species(parse_mol('C[N+](C)(C)CC(=O)NN.[Cl-]'), '')
+    before = Chem.MolToSmiles(item.mol)
+    drawn = prepare_drawing_mol(item)
+    coords = drawn.GetConformer().GetPositions()
+    chain = [0, 1, 4, 5, 7, 8]
+    assert max(coords[chain, 1]) - min(coords[chain, 1]) < 1e-8
+    assert all(coords[b, 0] > coords[a, 0] for a, b in zip(chain, chain[1:]))
+    assert coords[2, 1] > 0 and coords[3, 1] < 0
+    assert coords[2, 0] == pytest.approx(coords[1, 0])
+    assert coords[3, 0] == pytest.approx(coords[1, 0])
+    assert coords[6, 1] > 0 and coords[6, 0] == pytest.approx(coords[5, 0])
+    assert coords[9, 1] == pytest.approx(0)
+    assert coords[9, 0] > max(coords[chain, 0])
+    assert len(Chem.GetMolFrags(drawn)) == 2
+    assert Chem.MolToSmiles(drawn) == before
+    assert item.mol.GetNumConformers() == 0
+
+
+@pytest.mark.parametrize('smiles', ['F/C=C/F', 'F/C=C\\F', 'C[C@H](O)C(=O)O', 'c1ccccc1'])
+def test_stereo_and_rings_not_forced_collinear(smiles):
+    from chem_drawer import Species, parse_mol, prepare_drawing_mol
+    from rdkit import Chem
+    item = Species(parse_mol(smiles), '')
+    drawn = prepare_drawing_mol(item)
+    coords = drawn.GetConformer().GetPositions()
+    assert coords[:, 1].max() - coords[:, 1].min() > 0.1
+    assert Chem.MolToSmiles(drawn) == Chem.MolToSmiles(item.mol)
+    restored = Chem.MolFromMolBlock(Chem.MolToMolBlock(drawn))
+    assert Chem.MolToSmiles(restored) == Chem.MolToSmiles(item.mol)
