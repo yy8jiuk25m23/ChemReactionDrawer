@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import math
 import re
 import threading
 from collections import Counter
@@ -203,25 +204,56 @@ def font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def molecule_drawing(item: Species, width: int, height: int, svg: bool):
+def prepare_drawing_mol(item: Species) -> Chem.Mol:
+    """以刚性旋转将主要分子轴横向放置；不镜像、不改变化学结构。"""
     mol = Chem.Mol(item.mol)
-    rdDepictor.Compute2DCoords(mol)
+    rdDepictor.Compute2DCoords(mol, useRingTemplates=True)
+    conf = mol.GetConformer()
+    positions = [conf.GetAtomPosition(i) for i in range(mol.GetNumAtoms())]
+    cx = sum(p.x for p in positions) / len(positions)
+    cy = sum(p.y for p in positions) / len(positions)
+    xx = sum((p.x - cx) ** 2 for p in positions)
+    yy = sum((p.y - cy) ** 2 for p in positions)
+    xy = sum((p.x - cx) * (p.y - cy) for p in positions)
+    angle = 0.5 * math.atan2(2 * xy, xx - yy)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    for i, p in enumerate(positions):
+        x, y = p.x - cx, p.y - cy
+        conf.SetAtomPosition(i, (x * cos_a + y * sin_a, -x * sin_a + y * cos_a, 0))
+    return mol
+
+
+def drawing_size(item: Species) -> tuple[int, int]:
+    mol = prepare_drawing_mol(item)
+    coords = mol.GetConformer().GetPositions()
+    dx = max(coords[:, 0]) - min(coords[:, 0])
+    dy = max(coords[:, 1]) - min(coords[:, 1])
+    # 标签需要额外空间；画布按实际结构跨度设置，减少大片空白。
+    return max(300, min(1800, int(dx * 40 + 160))), max(280, min(1200, int(dy * 40 + 120)))
+
+
+def molecule_drawing(item: Species, width: int, height: int, svg: bool):
+    mol = prepare_drawing_mol(item)
     drawer = rdMolDraw2D.MolDraw2DSVG(width, height) if svg else rdMolDraw2D.MolDraw2DCairo(width, height)
     opts = drawer.drawOptions()
     opts.useBWAtomPalette()
     opts.clearBackground = True
-    opts.padding = 0.12
+    opts.padding = 0.08
     opts.bondLineWidth = 2.2
-    # 半展开表示：保留真实键线，将碳上的隐式氢写为 CH3/CH2/CH 基团。
+    opts.fixedBondLength = 55
+    opts.maxFontSize = 30
+    # 半展开表示：保留真实键线，将隐式氢写为 CH3/CH2/CH/NH/NH2 等基团。
     # 不向分子添加氢原子，也不改变键、手性、形式电荷或同位素。
     # 特殊碳原子由 RDKit 原生标签显示，以保留其同位素/电荷/自由基。
     for atom in mol.GetAtoms():
-        if atom.GetAtomicNum() != 6:
+        if atom.GetAtomicNum() not in (6, 7, 8, 16):
             continue
+        if atom.GetDegree() == 0:
+            continue  # H2O、NH3 等独立物种使用 RDKit 的常规标签顺序。
         if atom.GetIsotope() or atom.GetFormalCharge() or atom.GetNumRadicalElectrons():
             continue
         hydrogens = atom.GetTotalNumHs()
-        label = 'C'
+        label = atom.GetSymbol()
         if hydrogens:
             label += 'H' + (f'<sub>{hydrogens}</sub>' if hydrogens > 1 else '')
         opts.atomLabels[atom.GetIdx()] = label
@@ -238,9 +270,10 @@ def render(reaction: Reaction, conditions: str = '') -> tuple[bytes, bytes]:
         conditions = conditions + ('\n' if conditions else '') + '试剂: ' + ', '.join(labels)
     # 每个结构独占一个区域；复杂分子扩大区域，不压缩成不可读的小图。
     items = reaction.reactants + reaction.products
-    widths = [max(300, min(1000, 100 + item.mol.GetNumAtoms() * 20)) for item in items]
+    sizes = [drawing_size(item) for item in items]
+    widths = [w for w, h in sizes]
     arrow_width = max(360, max((len(line) for line in conditions.splitlines()), default=0) * 26 + 60)
-    height = max(420, max(item.mol.GetNumAtoms() for item in items) * 12 + 150)
+    height = max(360, max(h for w, h in sizes) + 80)
     height = min(height, 1200)
     width = sum(widths) + 70 * (len(items)-2) + arrow_width + 80 + 60 * sum(i.coefficient != 1 for i in items)
     if width * height > 30000000:
@@ -288,9 +321,9 @@ def render_molecule(item: Species, notes: str = '') -> tuple[bytes, bytes]:
     """单个分子独立画布，不添加反应箭头、不执行反应守恒检查。"""
     if len(notes) > 240 or len(notes.splitlines()) > 4:
         raise ReactionError('备注最多 240 字符、4 行；请简化标注。')
-    width = max(700, min(1800, item.mol.GetNumAtoms() * 30))
+    width, mol_height = drawing_size(item)
+    width = max(500, width)
     width = max(width, max((len(line) for line in notes.splitlines()), default=0) * 26 + 80)
-    mol_height = max(500, min(1200, item.mol.GetNumAtoms() * 22))
     height = mol_height + 34 * len(notes.splitlines()) + (30 if notes else 0)
     png_mol = molecule_drawing(item, width, mol_height, False)
     canvas = Image.new('RGB', (width, height), 'white')
@@ -336,7 +369,7 @@ def launch_gui():
     for label, value in [('自动识别', 'auto'), ('单个分子', 'molecule'), ('反应式', 'reaction')]:
         ttk.Radiobutton(mode_frame, text=label, variable=mode, value=value).pack(side='left', padx=6)
     ttk.Label(frame, text='单个分子名称 / SMILES:结构 / 化学方程式 / Reaction SMILES').pack(anchor='w')
-    ttk.Label(frame, text='表示方式：缩合基团（CH₃、CH₂、CH 等）与展开键线结合；保留电荷及手性').pack(anchor='w')
+    ttk.Label(frame, text='半展开结构式：CH₃、CH₂、NH、NH₂ 等基团；横向紧凑布局，保留电荷及手性').pack(anchor='w')
     entry = ttk.Entry(frame, font=('Microsoft YaHei', 12))
     entry.pack(fill='x', pady=6)
     entry.insert(0, 'CH3COOH + C2H5OH -> CH3COOC2H5 + H2O')

@@ -144,3 +144,16 @@ def test_mixed_formula_visible_carbons_and_preserved_structure(smiles):
         if atom.GetAtomicNum() == 6:
             assert f'atom-{atom.GetIdx()}' in labelled
     assert Chem.MolToSmiles(item.mol) == before
+
+
+def test_horizontal_orientation_preserves_stereo():
+    from chem_drawer import resolve, prepare_drawing_mol
+    from rdkit import Chem
+    item = resolve('Nα-(2,4-dinitro-5-fluorophenyl)-L-alaninamide', False)
+    before = Chem.MolToSmiles(item.mol)
+    drawn = prepare_drawing_mol(item)
+    positions = drawn.GetConformer().GetPositions()
+    assert positions[:, 0].var() >= positions[:, 1].var()
+    assert Chem.MolToSmiles(drawn) == before
+    assert [cip for i, cip in Chem.FindMolChiralCenters(drawn)] == ['S']
+    assert item.mol.GetNumConformers() == 0
