@@ -85,3 +85,46 @@ def test_reaction_agents_drawn():
     assert len(rxn.agents) == 1
     png, svg = render(rxn)
     assert '试剂: O=S(=O)(O)O' in svg.decode()
+
+
+@pytest.mark.parametrize('text', ['乙醇', 'SMILES:CCO', 'H+', 'SMILES:[Na+].[Cl-]', 'Nα-(2,4-dinitro-5-fluorophenyl)-L-alaninamide'])
+def test_single_molecule(text):
+    from chem_drawer import generate_image, parse_input, Species
+    item = parse_input(text, False)
+    assert isinstance(item, Species)
+    png, svg, message = generate_image(text, '单分子备注', False)
+    im = Image.open(io.BytesIO(png)); im.load()
+    assert im.info['dpi'][0] >= 299.99
+    root = ET.fromstring(svg)
+    assert not root.findall('./{http://www.w3.org/2000/svg}path')  # 外层无反应箭头
+    assert '单个分子' in message and '反应守恒检查' in message
+
+
+def test_named_chirality_and_formula():
+    from chem_drawer import resolve
+    from rdkit import Chem
+    from rdkit.Chem import rdMolDescriptors
+    item = resolve('Nα-(2,4-dinitro-5-fluorophenyl)-L-alaninamide', False)
+    assert rdMolDescriptors.CalcMolFormula(item.mol) == 'C9H9FN4O5'
+    assert [cip for index, cip in Chem.FindMolChiralCenters(item.mol)] == ['S']
+    assert '5486955' in item.source
+    # 芳环的 2、4 位硝基，5 位 F；SMILES 独立书写时仍为相同 S 结构。
+    reference = Chem.MolFromSmiles('C[C@H](Nc1c([N+](=O)[O-])cc([N+](=O)[O-])c(F)c1)C(N)=O')
+    assert Chem.MolToSmiles(item.mol) == Chem.MolToSmiles(reference)
+
+
+@pytest.mark.parametrize('text', ['', 'C2H6O', 'H2 + O2', 'H2 ->', '乙醇 ⇌ 水'])
+def test_auto_rejects_ambiguous_or_malformed(text):
+    from chem_drawer import parse_input
+    with pytest.raises(ReactionError):
+        parse_input(text, False)
+
+
+def test_modes_and_reaction_compatibility():
+    from chem_drawer import parse_input, Reaction, Species
+    assert isinstance(parse_input(EXAMPLES[0], False), Reaction)
+    assert isinstance(parse_input(EXAMPLES[2], False), Reaction)
+    assert isinstance(parse_input('SMILES:N->[Cu+2]', False, 'molecule'), Species)
+    assert isinstance(parse_input('2 H2 + O2 => 2 H2O', False), Reaction)
+    with pytest.raises(ReactionError):
+        parse_input('乙醇', False, 'reaction')

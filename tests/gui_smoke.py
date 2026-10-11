@@ -23,6 +23,11 @@ def factory():
     def start():
         try:
             widgets = descendants(root)
+            if '--molecule' in sys.argv:
+                entry = next(w for w in widgets if w.winfo_class() == 'TEntry')
+                entry.delete(0, 'end')
+                entry.insert(0, 'Nα-(2,4-dinitro-5-fluorophenyl)-L-alaninamide')
+                next(w for w in widgets if w.winfo_class() == 'TRadiobutton' and w.cget('text') == '单个分子').invoke()
             generate = next(w for w in widgets if w.winfo_class() == 'TButton' and w.cget('text') == '生成图片')
             generate.invoke()
             root.after(100, lambda: finish(widgets, 0))
@@ -46,7 +51,7 @@ def factory():
             root.update()
             ImageGrab.grab(xdisplay=':99').save(output/'gui-screen.png')
             entry = next(w for w in widgets if w.winfo_class() == 'TEntry')
-            entry.delete(0, 'end'); entry.insert(0, 'C2H6O -> C2H6O')
+            entry.delete(0, 'end'); entry.insert(0, 'C2H6O' if '--molecule' in sys.argv else 'C2H6O -> C2H6O')
             next(w for w in widgets if w.winfo_class() == 'TButton' and w.cget('text') == '生成图片').invoke()
             root.after(300, lambda: rejected(widgets, save))
         except Exception as exc:

@@ -1,4 +1,4 @@
-"""真实分子数据驱动的二维反应图生成器；GUI 或命令行均可使用。"""
+"""真实分子数据驱动的二维分子/反应图生成器；GUI 或命令行均可使用。"""
 from __future__ import annotations
 import argparse
 import io
@@ -36,6 +36,16 @@ STRUCTURES = {
 }
 FORMULA = re.compile(r'(?:[A-Z][a-z]?\d*|[()\[\]·.^\d+−-])+\Z')
 
+# PUG REST 实际核验：CID 5486955，C9H9FN4O5，(2S) 构型。
+# 来源：https://pubchem.ncbi.nlm.nih.gov/compound/5486955
+VERIFIED_NAMES = {
+    name.lower(): ('C[C@@H](C(=O)N)NC1=CC(=C(C=C1[N+](=O)[O-])[N+](=O)[O-])F', 5486955)
+    for name in (
+        'Nα-(2,4-dinitro-5-fluorophenyl)-L-alaninamide',
+        'N-alpha-(2,4-dinitro-5-fluorophenyl)-L-alaninamide',
+    )
+}
+
 @dataclass
 class Species:
     mol: Chem.Mol
@@ -64,6 +74,9 @@ def parse_mol(smiles: str) -> Chem.Mol:
 
 def resolve(text: str, online: bool = True) -> Species:
     key = text.strip()
+    if key.lower() in VERIFIED_NAMES:
+        smiles, cid = VERIFIED_NAMES[key.lower()]
+        return Species(parse_mol(smiles), key, source=f'PubChem CID {cid}（已核验本地结构）')
     smiles = STRUCTURES.get(key, STRUCTURES.get(key.lower()))
     if smiles:
         return Species(parse_mol(smiles), key)
@@ -135,7 +148,7 @@ def parse_reaction(text: str, online: bool = True) -> Reaction:
     if not text or len(text) > 10000:
         raise ReactionError('请输入反应式（最多 10000 字符）。')
     agents = []
-    if '>' in text and '->' not in text and '→' not in text:
+    if '>' in text and '->' not in text and '=>' not in text and '→' not in text:
         if text.count('>') != 2:
             raise ReactionError('Reaction SMILES 格式应为 reactants>agents>products 或 reactants>>products。')
         try:
@@ -166,6 +179,20 @@ def parse_reaction(text: str, online: bool = True) -> Reaction:
         raise ReactionError('反应不守恒，已停止生成：' + '；'.join(differences))
     balance = '元素、同位素及净电荷守恒检查通过（不代表反应机理或反应可行性已验证）。'
     return Reaction(left, right, agents, balance)
+
+
+def parse_input(text: str, online: bool = True, mode: str = 'auto') -> Reaction | Species:
+    """无箭头的自动输入按一个完整名称处理，不拆开名称中的连字符或盐组分。"""
+    text = text.strip()
+    if not text or len(text) > 10000:
+        raise ReactionError('请输入分子名称、SMILES 或反应式（最多 10000 字符）。')
+    if mode not in ('auto', 'molecule', 'reaction'):
+        raise ReactionError('输入模式必须为 auto、molecule 或 reaction。')
+    if mode == 'reaction' or (mode == 'auto' and re.search(r'[><→←⇌]', text)):
+        return parse_reaction(text, online)
+    if mode == 'auto' and not text.startswith('SMILES:') and re.search(r'\s+\+\s+', text):
+        raise ReactionError('检测到多个物种，但没有反应箭头。单个分子请输入一个名称或完整 SMILES；反应式请补充 ->。')
+    return resolve(text, online)
 
 
 def font(size: int):
@@ -244,21 +271,62 @@ def render(reaction: Reaction, conditions: str = '') -> tuple[bytes, bytes]:
     return out.getvalue(), '\n'.join(svgparts).encode('utf-8')
 
 
+def render_molecule(item: Species, notes: str = '') -> tuple[bytes, bytes]:
+    """单个分子独立画布，不添加反应箭头、不执行反应守恒检查。"""
+    if len(notes) > 240 or len(notes.splitlines()) > 4:
+        raise ReactionError('备注最多 240 字符、4 行；请简化标注。')
+    width = max(700, min(1800, item.mol.GetNumAtoms() * 30))
+    width = max(width, max((len(line) for line in notes.splitlines()), default=0) * 26 + 80)
+    mol_height = max(500, min(1200, item.mol.GetNumAtoms() * 22))
+    height = mol_height + 34 * len(notes.splitlines()) + (30 if notes else 0)
+    png_mol = molecule_drawing(item, width, mol_height, False)
+    canvas = Image.new('RGB', (width, height), 'white')
+    canvas.paste(Image.open(io.BytesIO(png_mol)).convert('RGB'), (0, 0))
+    raw = molecule_drawing(item, width, mol_height, True)
+    raw = raw[raw.index('<svg'):]
+    svgparts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">', '<rect width="100%" height="100%" fill="white"/>', raw]
+    draw = ImageDraw.Draw(canvas)
+    for row, line in enumerate(notes.splitlines()):
+        y = mol_height + 20 + row * 34
+        draw.text((width / 2, y), line, fill='black', font=font(26), anchor='mm')
+        svgparts.append(f'<text x="{width / 2}" y="{y}" dominant-baseline="middle" text-anchor="middle" font-family="Microsoft YaHei,Arial,sans-serif" font-size="26">{escape(line)}</text>')
+    svgparts.append('</svg>')
+    out = io.BytesIO()
+    canvas.save(out, format='PNG', dpi=(300, 300))
+    return out.getvalue(), '\n'.join(svgparts).encode('utf-8')
+
+
+def generate_image(text: str, conditions: str = '', online: bool = True, mode: str = 'auto') -> tuple[bytes, bytes, str]:
+    parsed = parse_input(text, online, mode)
+    if isinstance(parsed, Species):
+        png, svg = render_molecule(parsed, conditions)
+        formula = rdMolDescriptors.CalcMolFormula(parsed.mol)
+        return png, svg, f'单个分子：{formula}。数据来源：{parsed.source}。单分子不涉及反应守恒检查。'
+    png, svg = render(parsed, conditions)
+    sources = sorted(set(i.source for i in parsed.reactants + parsed.products + parsed.agents))
+    return png, svg, parsed.balance + ' 数据来源：' + ', '.join(sources)
+
+
 def launch_gui():
     import tkinter as tk
     from tkinter import ttk, filedialog
     from PIL import ImageTk
     root = tk.Tk()
-    root.title('化学二维结构反应图生成器')
+    root.title('化学二维分子与反应图生成器')
     root.geometry('1100x760')
     root.minsize(760, 560)
     frame = ttk.Frame(root, padding=14)
     frame.pack(fill='both', expand=True)
-    ttk.Label(frame, text='化学方程式 / 名称 / Reaction SMILES（分隔加号两侧、系数后请留空格）').pack(anchor='w')
+    mode_frame = ttk.Frame(frame)
+    mode_frame.pack(fill='x')
+    mode = tk.StringVar(value='auto')
+    for label, value in [('自动识别', 'auto'), ('单个分子', 'molecule'), ('反应式', 'reaction')]:
+        ttk.Radiobutton(mode_frame, text=label, variable=mode, value=value).pack(side='left', padx=6)
+    ttk.Label(frame, text='单个分子名称 / SMILES:结构 / 化学方程式 / Reaction SMILES').pack(anchor='w')
     entry = ttk.Entry(frame, font=('Microsoft YaHei', 12))
     entry.pack(fill='x', pady=6)
     entry.insert(0, 'CH3COOH + C2H5OH -> CH3COOC2H5 + H2O')
-    ttk.Label(frame, text='反应条件（催化剂、温度、溶剂；可分行，最多4行）').pack(anchor='w')
+    ttk.Label(frame, text='反应条件 / 单分子备注（可分行，最多4行）').pack(anchor='w')
     conditions = tk.Text(frame, height=3, font=('Microsoft YaHei', 11))
     conditions.pack(fill='x', pady=6)
     controls = ttk.Frame(frame)
@@ -311,18 +379,15 @@ def launch_gui():
             status.set(message)
             update_preview()
     def generate():
-        equation, cond, allow_online = entry.get(), conditions.get('1.0', 'end').strip(), online.get()
+        equation, cond, allow_online, input_mode = entry.get(), conditions.get('1.0', 'end').strip(), online.get(), mode.get()
         state.update(png=None, svg=None)
         preview.delete('all')
         save_button.config(state='disabled')
         generate_button.config(state='disabled')
-        status.set('正在解析结构、验证守恒并绘制…')
+        status.set('正在解析结构并绘制（反应式会验证守恒）…')
         def worker():
             try:
-                rxn = parse_reaction(equation, allow_online)
-                png, svg = render(rxn, cond)
-                sources = sorted(set(i.source for i in rxn.reactants+rxn.products+rxn.agents))
-                results.put((png, svg, rxn.balance+' 数据来源：'+', '.join(sources)))
+                results.put(generate_image(equation, cond, allow_online, input_mode))
             except Exception as exc:
                 results.put(exc)
         threading.Thread(target=worker, daemon=True).start()
@@ -334,7 +399,8 @@ def launch_gui():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--equation', help='命令行反应式；省略则打开中文图形界面')
+    parser.add_argument('--equation', '--input', dest='equation', help='分子名称、SMILES 或反应式；省略则打开中文图形界面')
+    parser.add_argument('--mode', choices=['auto', 'molecule', 'reaction'], default='auto')
     parser.add_argument('--conditions', default='')
     parser.add_argument('--output', default='output/reaction', help='输出文件前缀，同时生成 PNG/SVG')
     parser.add_argument('--offline', action='store_true')
@@ -343,13 +409,12 @@ def main():
         launch_gui()
         return
     try:
-        rxn = parse_reaction(args.equation, not args.offline)
-        png, svg = render(rxn, args.conditions)
+        png, svg, message = generate_image(args.equation, args.conditions, not args.offline, args.mode)
         target = Path(args.output)
         target.parent.mkdir(parents=True, exist_ok=True)
         Path(str(target)+'.png').write_bytes(png)
         Path(str(target)+'.svg').write_bytes(svg)
-        print(rxn.balance)
+        print(message)
         print('已生成：', str(target)+'.png', str(target)+'.svg')
     except (ReactionError, OSError) as exc:
         parser.exit(2, f'错误：{exc}\n')

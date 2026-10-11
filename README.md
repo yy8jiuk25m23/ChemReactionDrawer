@@ -1,4 +1,4 @@
-# ChemReactionDrawer 化学二维结构反应图生成器
+# ChemReactionDrawer 化学二维分子与反应图生成器
 
 Python + RDKit + Tkinter。绘图来自真实分子连接结构，不使用 AI 文生图。支持中文界面、PNG（300 DPI 元数据）与纯矢量 SVG、反应条件、整数计量系数、离子、明确指定的多组分结构，以及元素/同位素/净电荷守恒检查。
 
@@ -7,7 +7,7 @@ Python + RDKit + Tkinter。绘图来自真实分子连接结构，不使用 AI �
 1. 从 https://www.python.org/downloads/windows/ 安装 **Python 3.12 64 位**。安装时保留 `pip`、`tcl/tk and IDLE`、Python Launcher，并勾选 `Add python.exe to PATH`。
 2. 下载完整项目 ZIP，并解压到可写目录，例如 `D:\ChemReactionDrawer`。不要直接从压缩包内部启动。
 3. 双击 `start.bat`。首次启动自动创建 `.venv` 并安装依赖，需要联网；后续依赖完整时直接启动。若失败，窗口保留错误信息。
-4. 输入反应式，填写可选条件，点击“生成图片”。预览成功后，选择 PNG/SVG，点击“保存图片”。生成一次即可分别保存两种格式。
+4. 输入单个分子名称、SMILES 或反应式，填写可选条件/备注，点击“生成图片”。预览成功后，选择 PNG/SVG，点击“保存图片”。生成一次即可分别保存两种格式。
 5. SVG 可用浏览器、Inkscape 或 Illustrator 打开；PNG 可用 Windows 照片查看。图形界面预览会缩放，保存文件保持完整分辨率。
 
 手动安装、运行（在项目目录打开终端）：
@@ -40,6 +40,30 @@ ChemReactionDrawer/
 `.venv/` 首次启动自动创建，不包含在分发包中。
 
 ## 支持的输入
+
+### 单个分子（无需反应箭头）
+
+默认“自动识别”模式：没有箭头即作为一个完整分子名称解析；有箭头按反应式解析。也可显式选择“单个分子”或“反应式”。单个分子不做反应守恒检查，状态栏显示分子式和结构来源；备注放在结构下方。
+
+直接输入以下任意一个即可生成独立二维结构图：
+
+```text
+Nα-(2,4-dinitro-5-fluorophenyl)-L-alaninamide
+N-alpha-(2,4-dinitro-5-fluorophenyl)-L-alaninamide
+乙醇
+SMILES:CCO
+SMILES:[Na+].[Cl-]
+```
+
+用户示例已经实际通过 PubChem 查到唯一记录 **CID 5486955**，分子式 C9H9FN4O5，IUPAC 名称 `(2S)-2-(5-fluoro-2,4-dinitroanilino)propanamide`。程序内置从该记录核验的含立体信息 SMILES，原始名称和 `N-alpha` 写法都可离线使用；其他准确名称仍按内置表/PubChem 查询，不进行通用 IUPAC 名称猜测。数据来源：https://pubchem.ncbi.nlm.nih.gov/compound/5486955
+
+CLI 示例（Windows）：
+
+```bat
+.venv\Scripts\python.exe chem_drawer.py --offline --input "Nα-(2,4-dinitro-5-fluorophenyl)-L-alaninamide" --output output/single-alaninamide
+```
+
+`--input` 和原来的 `--equation` 为同一个参数的别名；可用 `--mode molecule` 强制单分子模式。包含配位键箭头的 SMILES（例如 `SMILES:N->[Cu+2]`）请使用“单个分子”模式，避免自动判为反应。
 
 ### 普通方程式 / 化学名称
 
@@ -96,4 +120,4 @@ CC(=O)O.CCO>O=S(=O)(O)O>CCOC(C)=O.O
 
 ## PubChem 网络要求
 
-在线名称查询需要访问 `https://pubchem.ncbi.nlm.nih.gov`，请求保留 TLS 验证，超时会报错，不会静默替换结构。三个指定示例及本地名称无需网络。当前云端到 PubChem 的代理请求被拒绝，真实在线名称查询尚未验证；如使用受限网络，请在环境设置允许该域名。该限制不影响本地映射、SMILES、守恒检查与绘图。
+在线名称查询需要访问 `https://pubchem.ncbi.nlm.nih.gov`，请求保留 TLS 验证，超时会报错，不会静默替换结构。三个指定示例及本地名称无需网络。初次开发时云端请求被拒绝；本次更新已经成功实际查询并核验用户给出的单分子名称及结构。其他名称仍取决于数据库收录情况和网络可用性；如使用受限网络，请在环境设置允许该域名。网络不可用时不影响本地映射、SMILES、守恒检查与绘图。
