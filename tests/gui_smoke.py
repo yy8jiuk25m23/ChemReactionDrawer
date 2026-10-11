@@ -23,6 +23,13 @@ def factory():
     def start():
         try:
             widgets = descendants(root)
+            if '--size' in sys.argv or '--fit-size' in sys.argv:
+                w = next(w for w in widgets if w.winfo_name() == 'output_width')
+                h = next(w for w in widgets if w.winfo_name() == 'output_height')
+                w.insert(0, '1000' if '--fit-size' in sys.argv else '2000')
+                h.insert(0, '400' if '--fit-size' in sys.argv else '500')
+                if '--fit-size' in sys.argv:
+                    next(w for w in widgets if w.winfo_class() == 'TCombobox').current(1)
             if '--molecule' in sys.argv or '--straight' in sys.argv:
                 entry = next(w for w in widgets if w.winfo_class() == 'TEntry')
                 entry.delete(0, 'end')
@@ -46,6 +53,10 @@ def factory():
                 filedialog.asksaveasfilename = lambda **kw: str(output/f'gui-saved.{fmt.lower()}')
                 save.invoke()
             Image.open(output/'gui-saved.png').load()
+            if '--size' in sys.argv:
+                assert Image.open(output/'gui-saved.png').size == (2000, 500)
+            if '--fit-size' in sys.argv:
+                assert Image.open(output/'gui-saved.png').size == (1000, 400)
             assert (output/'gui-saved.svg').read_text().startswith('<svg')
             assert next(w for w in widgets if w.winfo_class() == 'Canvas').find_all()
             root.update()

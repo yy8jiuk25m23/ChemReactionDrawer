@@ -12,7 +12,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 from rdkit import Chem
 from rdkit.Geometry import Point2D
 from rdkit.Chem import rdDepictor, rdMolDescriptors
@@ -336,54 +336,69 @@ def molecule_drawing(item: Species, width: int, height: int, svg: bool):
     return drawer.GetDrawingText()
 
 
+def compact_panel(item: Species) -> tuple[Image.Image, str]:
+    """按实际绘图内容裁去每个面板的白边，PNG/SVG 使用相同裁剪窗口。"""
+    width, height = drawing_size(item)
+    image = Image.open(io.BytesIO(molecule_drawing(item, width, height, False))).convert('RGB')
+    box = ImageChops.difference(image, Image.new('RGB', image.size, 'white')).getbbox()
+    if box is None:
+        raise ReactionError('分子绘图为空。')
+    left, top, right, bottom = box
+    left, top = max(0, left-10), max(0, top-10)
+    right, bottom = min(width, right+10), min(height, bottom+10)
+    image = image.crop((left, top, right, bottom))
+    raw = molecule_drawing(item, width, height, True)
+    raw = raw[raw.index('<svg'):]
+    header, body = raw.split('>', 1)
+    header = re.sub(r"\s(?:x|y|width|height|viewBox)\s*=\s*(['\"]).*?\1", '', header, flags=re.S)
+    raw = header + f' width="{image.width}" height="{image.height}" viewBox="{left} {top} {image.width} {image.height}">' + body
+    return image, raw
+
+
 def render(reaction: Reaction, conditions: str = '') -> tuple[bytes, bytes]:
     if len(conditions) > 240 or len(conditions.splitlines()) > 4:
         raise ReactionError('条件最多 240 字符、4 行；请简化标注。')
     labels = [x.label or Chem.MolToSmiles(x.mol) for x in reaction.agents]
     if labels:
-        conditions = conditions + ('\n' if conditions else '') + '试剂: ' + ', '.join(labels)
-    # 每个结构独占一个区域；复杂分子扩大区域，不压缩成不可读的小图。
+        conditions += ('\n' if conditions else '') + '试剂: ' + ', '.join(labels)
     items = reaction.reactants + reaction.products
-    sizes = [drawing_size(item) for item in items]
-    widths = [w for w, h in sizes]
-    arrow_width = max(360, max((len(line) for line in conditions.splitlines()), default=0) * 26 + 60)
-    height = max(360, max(h for w, h in sizes) + 80)
-    height = min(height, 1200)
-    width = sum(widths) + 70 * (len(items)-2) + arrow_width + 80 + 60 * sum(i.coefficient != 1 for i in items)
+    panels = [compact_panel(item) for item in items]
+    lines = conditions.splitlines()
+    arrow_width = max(130, int(max((font(24).getlength(line) for line in lines), default=0)) + 30)
+    height = max(120, max(im.height for im, svg in panels) + 40, 2 * (len(lines) * 30 + 35) if lines else 0)
+    coefficient_widths = [int(font(28).getlength(str(i.coefficient)))+12 if i.coefficient != 1 else 0 for i in items]
+    width = sum(im.width for im, svg in panels) + 36 * (len(items)-2) + arrow_width + 40 + sum(coefficient_widths)
     if width * height > 30000000:
         raise ReactionError('图像过大；请减少反应物或条件长度。')
     canvas = Image.new('RGB', (width, height), 'white')
     draw = ImageDraw.Draw(canvas)
-    svgparts = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{width}" height="{height}" viewBox="0 0 {width} {height}">', '<rect width="100%" height="100%" fill="white"/>']
-    def write(text, x, y, size=34):
+    svgparts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">', '<rect width="100%" height="100%" fill="white"/>']
+    def write(text, x, y, size=28):
         draw.text((x, y), text, fill='black', font=font(size), anchor='mm')
         svgparts.append(f'<text x="{x}" y="{y}" dominant-baseline="middle" text-anchor="middle" font-family="Microsoft YaHei,Arial,sans-serif" font-size="{size}">{escape(text)}</text>')
-    x, index = 40, 0
+    x, index = 20, 0
     for side_index, side in enumerate([reaction.reactants, reaction.products]):
         for j, item in enumerate(side):
             if j:
-                write('+', x+35, height/2, 42)
-                x += 70
-            if item.coefficient != 1:
-                write(str(item.coefficient), x+25, height/2, 38)
-                x += 60
-            w = widths[index]
+                write('+', x+18, height/2, 30)
+                x += 36
+            cw = coefficient_widths[index]
+            if cw:
+                write(str(item.coefficient), x+cw/2, height/2)
+                x += cw
+            image, raw = panels[index]
             index += 1
-            data = molecule_drawing(item, w, height-80, False)
-            canvas.paste(Image.open(io.BytesIO(data)).convert('RGB'), (int(x), 40))
-            raw = molecule_drawing(item, w, height-80, True)
-            raw = raw[raw.index('<svg'):]
-            # 根 SVG 移到独立面板，保留 RDKit 原始矢量内容。
-            raw = raw.replace('<svg ', f'<svg x="{x}" y="40" ', 1)
-            svgparts.append(raw)
-            x += w
+            y = (height-image.height)//2
+            canvas.paste(image, (x, y))
+            svgparts.append(raw.replace('<svg ', f'<svg x="{x}" y="{y}" ', 1))
+            x += image.width
         if side_index == 0:
             y = height/2
-            draw.line((x+25, y, x+arrow_width-25, y), fill='black', width=4)
-            draw.polygon([(x+arrow_width-25,y),(x+arrow_width-47,y-11),(x+arrow_width-47,y+11)], fill='black')
-            svgparts.append(f'<path d="M {x+25} {y} H {x+arrow_width-25} M {x+arrow_width-47} {y-11} L {x+arrow_width-25} {y} L {x+arrow_width-47} {y+11}" fill="none" stroke="black" stroke-width="4"/>')
-            for row, line in enumerate(conditions.splitlines()):
-                write(line, x+arrow_width/2, y-45-(len(conditions.splitlines())-1-row)*34, 26)
+            draw.line((x+12, y, x+arrow_width-12, y), fill='black', width=3)
+            draw.polygon([(x+arrow_width-12,y),(x+arrow_width-27,y-7),(x+arrow_width-27,y+7)], fill='black')
+            svgparts.append(f'<path d="M {x+12} {y} H {x+arrow_width-12} M {x+arrow_width-27} {y-7} L {x+arrow_width-12} {y} L {x+arrow_width-27} {y+7}" fill="none" stroke="black" stroke-width="3"/>')
+            for row, line in enumerate(lines):
+                write(line, x+arrow_width/2, y-28-(len(lines)-1-row)*30, 24)
             x += arrow_width
     svgparts.append('</svg>')
     out = io.BytesIO()
@@ -416,15 +431,57 @@ def render_molecule(item: Species, notes: str = '') -> tuple[bytes, bytes]:
     return out.getvalue(), '\n'.join(svgparts).encode('utf-8')
 
 
-def generate_image(text: str, conditions: str = '', online: bool = True, mode: str = 'auto') -> tuple[bytes, bytes, str]:
+def resize_output(png: bytes, svg: bytes, width=None, height=None, size_mode: str = 'canvas') -> tuple[bytes, bytes]:
+    """调整画布或统一比例适配，绝不独立缩放横纵轴，不裁掉结构。"""
+    def dimension(value):
+        if value is None or str(value).strip() == '':
+            return None
+        if not re.fullmatch(r'\d+', str(value).strip()):
+            raise ReactionError('图片宽高必须为整数像素，或留空自动计算。')
+        value = int(value)
+        if not 64 <= value <= 10000:
+            raise ReactionError('图片宽高须为 64–10000 像素。')
+        return value
+    width, height = dimension(width), dimension(height)
+    if size_mode not in ('canvas', 'fit'):
+        raise ReactionError('尺寸方式须为 canvas 或 fit。')
+    if width is None and height is None:
+        return png, svg
+    original = Image.open(io.BytesIO(png)).convert('RGB')
+    ow, oh = original.size
+    if size_mode == 'fit':
+        width = width or max(64, round(ow * height / oh))
+        height = height or max(64, round(oh * width / ow))
+    else:
+        width, height = width or ow, height or oh
+    if width > 10000 or height > 10000 or width * height > 30000000:
+        raise ReactionError('输出画布过大；单边最多10000像素，总计最多3000万像素。')
+    if size_mode == 'canvas' and (width < ow or height < oh):
+        raise ReactionError(f'保持结构大小需要至少 {ow} × {oh} 像素；请增大画布或选择“等比适配”。')
+    scale = min(width/ow, height/oh) if size_mode == 'fit' else 1.0
+    image = original.resize((max(1, round(ow*scale)), max(1, round(oh*scale))), Image.Resampling.LANCZOS) if scale != 1 else original
+    canvas = Image.new('RGB', (width, height), 'white')
+    canvas.paste(image, ((width-image.width)//2, (height-image.height)//2))
+    out = io.BytesIO()
+    canvas.save(out, format='PNG', dpi=(300, 300))
+    x, y = (width-ow*scale)/2, (height-oh*scale)/2
+    wrapped = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><rect width="100%" height="100%" fill="white"/><g transform="translate({x} {y}) scale({scale})">' + svg.decode('utf-8') + '</g></svg>'
+    return out.getvalue(), wrapped.encode('utf-8')
+
+
+def generate_image(text: str, conditions: str = '', online: bool = True, mode: str = 'auto', width=None, height=None, size_mode: str = 'canvas') -> tuple[bytes, bytes, str]:
     parsed = parse_input(text, online, mode)
     if isinstance(parsed, Species):
         png, svg = render_molecule(parsed, conditions)
         formula = rdMolDescriptors.CalcMolFormula(parsed.mol)
-        return png, svg, f'单个分子：{formula}。数据来源：{parsed.source}。单分子不涉及反应守恒检查。'
-    png, svg = render(parsed, conditions)
-    sources = sorted(set(i.source for i in parsed.reactants + parsed.products + parsed.agents))
-    return png, svg, parsed.balance + ' 数据来源：' + ', '.join(sources)
+        message = f'单个分子：{formula}。数据来源：{parsed.source}。单分子不涉及反应守恒检查。'
+    else:
+        png, svg = render(parsed, conditions)
+        sources = sorted(set(i.source for i in parsed.reactants + parsed.products + parsed.agents))
+        message = parsed.balance + ' 数据来源：' + ', '.join(sources)
+    png, svg = resize_output(png, svg, width, height, size_mode)
+    size = Image.open(io.BytesIO(png)).size
+    return png, svg, message + f' 输出尺寸：{size[0]} × {size[1]} 像素。'
 
 
 def launch_gui():
@@ -457,6 +514,18 @@ def launch_gui():
         ttk.Radiobutton(controls, text=value, variable=fmt, value=value).pack(side='left', padx=6)
     online = tk.BooleanVar(value=True)
     ttk.Checkbutton(controls, text='允许 PubChem 名称查询（需网络）', variable=online).pack(side='left', padx=12)
+    dimensions = ttk.Frame(frame)
+    dimensions.pack(fill='x', pady=6)
+    ttk.Label(dimensions, text='图片宽(px)').pack(side='left')
+    output_width = ttk.Entry(dimensions, width=7, name='output_width')
+    output_width.pack(side='left', padx=6)
+    ttk.Label(dimensions, text='高(px)').pack(side='left')
+    output_height = ttk.Entry(dimensions, width=7, name='output_height')
+    output_height.pack(side='left', padx=6)
+    size_mode = ttk.Combobox(dimensions, state='readonly', width=23, values=['保持结构大小，仅调整画布', '等比适配，不拉伸'])
+    size_mode.current(0)
+    size_mode.pack(side='left', padx=6)
+    ttk.Label(dimensions, text='留空=自动；修改后点击生成').pack(side='left')
     preview = tk.Canvas(frame, background='white', highlightthickness=1, highlightbackground='#ccc')
     preview.pack(fill='both', expand=True, pady=12)
     status = tk.StringVar(value='输入准确结构后点击生成。分子式存在歧义时将拒绝生成。')
@@ -501,6 +570,8 @@ def launch_gui():
             update_preview()
     def generate():
         equation, cond, allow_online, input_mode = entry.get(), conditions.get('1.0', 'end').strip(), online.get(), mode.get()
+        width, height = output_width.get(), output_height.get()
+        resizing = 'fit' if size_mode.current() == 1 else 'canvas'
         state.update(png=None, svg=None)
         preview.delete('all')
         save_button.config(state='disabled')
@@ -508,7 +579,7 @@ def launch_gui():
         status.set('正在解析结构并绘制（反应式会验证守恒）…')
         def worker():
             try:
-                results.put(generate_image(equation, cond, allow_online, input_mode))
+                results.put(generate_image(equation, cond, allow_online, input_mode, width, height, resizing))
             except Exception as exc:
                 results.put(exc)
         threading.Thread(target=worker, daemon=True).start()
@@ -525,12 +596,15 @@ def main():
     parser.add_argument('--conditions', default='')
     parser.add_argument('--output', default='output/reaction', help='输出文件前缀，同时生成 PNG/SVG')
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--width', help='输出宽度（像素），留空自动')
+    parser.add_argument('--height', help='输出高度（像素），留空自动')
+    parser.add_argument('--size-mode', choices=['canvas', 'fit'], default='canvas', help='canvas仅调整画布；fit等比适配')
     args = parser.parse_args()
     if args.equation is None:
         launch_gui()
         return
     try:
-        png, svg, message = generate_image(args.equation, args.conditions, not args.offline, args.mode)
+        png, svg, message = generate_image(args.equation, args.conditions, not args.offline, args.mode, args.width, args.height, args.size_mode)
         target = Path(args.output)
         target.parent.mkdir(parents=True, exist_ok=True)
         Path(str(target)+'.png').write_bytes(png)

@@ -191,3 +191,56 @@ def test_stereo_and_rings_not_forced_collinear(smiles):
     assert Chem.MolToSmiles(drawn) == Chem.MolToSmiles(item.mol)
     restored = Chem.MolFromMolBlock(Chem.MolToMolBlock(drawn))
     assert Chem.MolToSmiles(restored) == Chem.MolToSmiles(item.mol)
+
+
+def test_custom_canvas_preserves_pixels():
+    from chem_drawer import generate_image
+    png, svg, _ = generate_image(EXAMPLES[0], online=False)
+    original = Image.open(io.BytesIO(png)).convert('RGB')
+    custom, vector, _ = generate_image(EXAMPLES[0], online=False, width=original.width+200, height=original.height+100)
+    image = Image.open(io.BytesIO(custom)).convert('RGB')
+    assert image.size == (original.width+200, original.height+100)
+    assert image.crop((100, 50, original.width+100, original.height+50)).tobytes() == original.tobytes()
+    root = ET.fromstring(vector)
+    assert root.attrib['width'] == str(image.width)
+    assert root.attrib['height'] == str(image.height)
+
+
+def test_fit_preserves_aspect_and_output_size():
+    from chem_drawer import generate_image
+    from PIL import ImageChops
+    png, _, _ = generate_image(EXAMPLES[0], online=False)
+    original = Image.open(io.BytesIO(png)).convert('RGB')
+    fitted, svg, _ = generate_image(EXAMPLES[0], online=False, width=600, height=400, size_mode='fit')
+    image = Image.open(io.BytesIO(fitted)).convert('RGB')
+    assert image.size == (600, 400)
+    def aspect(im):
+        ink = ImageChops.difference(im, Image.new('RGB', im.size, 'white')).convert('L').point(lambda v: 255 if v > 64 else 0)
+        x1,y1,x2,y2 = ink.getbbox()
+        return (x2-x1)/(y2-y1)
+    assert aspect(image) == pytest.approx(aspect(original), rel=0.03)
+    root = ET.fromstring(svg)
+    group = root.find('{http://www.w3.org/2000/svg}g')
+    # 矢量只用一个统一比例，横纵没有独立的 scale(x,y)。
+    assert 'scale(' in group.attrib['transform']
+    assert ',' not in group.attrib['transform']
+    assert Image.open(io.BytesIO(fitted)).info['dpi'][0] >= 299.99
+
+
+@pytest.mark.parametrize('kwargs', [{'width':64}, {'width':'abc'}, {'height':0}, {'width':10001}, {'width':10000,'height':10000}])
+def test_invalid_or_clipping_size_rejected(kwargs):
+    from chem_drawer import generate_image
+    with pytest.raises(ReactionError):
+        generate_image(EXAMPLES[0], online=False, **kwargs)
+
+
+def test_compact_small_species_and_arrow():
+    from chem_drawer import compact_panel, resolve, generate_image
+    im, svg = compact_panel(resolve('H2O', False))
+    assert im.width < 100
+    png, svg, _ = generate_image(EXAMPLES[0], online=False)
+    root = ET.fromstring(svg)
+    arrow = root.find('./{http://www.w3.org/2000/svg}path')
+    import re
+    match = re.match(r'M (\S+) (\S+) H (\S+)', arrow.attrib['d'])
+    assert float(match[3])-float(match[1]) <= 120
