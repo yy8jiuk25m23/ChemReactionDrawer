@@ -128,3 +128,19 @@ def test_modes_and_reaction_compatibility():
     assert isinstance(parse_input('2 H2 + O2 => 2 H2O', False), Reaction)
     with pytest.raises(ReactionError):
         parse_input('乙醇', False, 'reaction')
+
+
+@pytest.mark.parametrize('smiles', ['CCO', 'c1ccccc1', '[13CH3][C@H](O)C(=O)[O-]', '[CH2]CC'])
+def test_mixed_formula_visible_carbons_and_preserved_structure(smiles):
+    from chem_drawer import Species, parse_mol, molecule_drawing
+    from rdkit import Chem
+    item = Species(parse_mol(smiles), '')
+    before = Chem.MolToSmiles(item.mol)
+    svg = molecule_drawing(item, 900, 600, True)
+    root = ET.fromstring(svg)
+    # 实际输出的原子字形路径应覆盖全部碳，而非只存在键线中的端点编号。
+    labelled = {p.attrib.get('class') for p in root.iter() if p.tag.endswith('path')}
+    for atom in item.mol.GetAtoms():
+        if atom.GetAtomicNum() == 6:
+            assert f'atom-{atom.GetIdx()}' in labelled
+    assert Chem.MolToSmiles(item.mol) == before

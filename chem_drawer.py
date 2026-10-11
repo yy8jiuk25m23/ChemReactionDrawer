@@ -212,6 +212,19 @@ def molecule_drawing(item: Species, width: int, height: int, svg: bool):
     opts.clearBackground = True
     opts.padding = 0.12
     opts.bondLineWidth = 2.2
+    # 半展开表示：保留真实键线，将碳上的隐式氢写为 CH3/CH2/CH 基团。
+    # 不向分子添加氢原子，也不改变键、手性、形式电荷或同位素。
+    # 特殊碳原子由 RDKit 原生标签显示，以保留其同位素/电荷/自由基。
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() != 6:
+            continue
+        if atom.GetIsotope() or atom.GetFormalCharge() or atom.GetNumRadicalElectrons():
+            continue
+        hydrogens = atom.GetTotalNumHs()
+        label = 'C'
+        if hydrogens:
+            label += 'H' + (f'<sub>{hydrogens}</sub>' if hydrogens > 1 else '')
+        opts.atomLabels[atom.GetIdx()] = label
     drawer.DrawMolecule(mol)
     drawer.FinishDrawing()
     return drawer.GetDrawingText()
@@ -323,6 +336,7 @@ def launch_gui():
     for label, value in [('自动识别', 'auto'), ('单个分子', 'molecule'), ('反应式', 'reaction')]:
         ttk.Radiobutton(mode_frame, text=label, variable=mode, value=value).pack(side='left', padx=6)
     ttk.Label(frame, text='单个分子名称 / SMILES:结构 / 化学方程式 / Reaction SMILES').pack(anchor='w')
+    ttk.Label(frame, text='表示方式：缩合基团（CH₃、CH₂、CH 等）与展开键线结合；保留电荷及手性').pack(anchor='w')
     entry = ttk.Entry(frame, font=('Microsoft YaHei', 12))
     entry.pack(fill='x', pady=6)
     entry.insert(0, 'CH3COOH + C2H5OH -> CH3COOC2H5 + H2O')
