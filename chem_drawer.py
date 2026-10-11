@@ -312,6 +312,7 @@ def molecule_drawing(item: Species, width: int, height: int, svg: bool):
     opts.clearBackground = True
     opts.padding = 0.08
     opts.bondLineWidth = 2.2
+    opts.multipleBondOffset = 0.075  # 多重键平行线间距为默认值的一半。
     opts.fixedBondLength = 65
     opts.maxFontSize = 30
     # 半展开表示：保留真实键线，将隐式氢写为 CH3/CH2/CH/NH/NH2 等基团。
